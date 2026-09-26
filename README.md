@@ -1774,6 +1774,34 @@ collector.increase()
 assert collector.is_counting_2()
 ```
 
+##### Persisting and restoring the active state configuration
+
+The value of a model's state attribute depends on the shape of the active configuration: it is a (separator-joined) string for nested states but a list of strings when parallel states are active.
+This makes it cumbersome to persist the state of a machine (e.g. to continue after a service restart) since it is ambiguous which parallel branches are active and which leaf each branch is currently in.
+`HierarchicalMachine` offers `get_state_snapshot` and `set_state_snapshot` for a reliable round trip instead.
+A snapshot represents the active configuration as a nested dictionary which only consists of built-in types, does not depend on the configured state name separator and can be serialized (e.g. to JSON).
+Restoring a snapshot does not trigger any callbacks or transitions and snapshots are validated before they are applied: malformed or outdated snapshots (unknown states, missing parallel branches, unspecified children of states with an `initial` substate, ...) raise a `ValueError` instead of being 'repaired' by guessing a default state.
+
+```python
+states = [
+    'idle',
+    {'name': 'review', 'children': ['draft', 'ready'], 'initial': 'draft'},
+    {'name': 'signing', 'parallel': ['identity', 'payment']},
+]
+
+machine = HierarchicalMachine(states=states, initial='idle')
+machine.to_review()  # enters 'review_draft'
+machine.to_signing()  # enters 'signing_identity' and 'signing_payment'
+
+snapshot = machine.get_state_snapshot()
+# >>> {'signing': {'identity': {}, 'payment': {}}}
+
+# ... persist the snapshot and restore it later (e.g. after a restart)
+restored = HierarchicalMachine(states=states, initial='idle')
+restored.set_state_snapshot(snapshot)
+assert restored.state == machine.state
+```
+
 #### <a name="diagrams"></a> Diagrams
 
 Additional Keywords:

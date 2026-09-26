@@ -864,6 +864,92 @@ class HierarchicalMachine(Machine):
         for mod in models:
             setattr(mod, self.model_attribute, values if len(values) > 1 else values[0])
 
+    def get_state_snapshot(self, model=None):
+        """Returns a snapshot of the model's currently active state configuration. In contrast to the
+            model's state attribute, the snapshot preserves the state hierarchy as a nested dictionary.
+            This makes it unambiguous which (parallel) branches are active and which leaf each branch
+            is currently in. The snapshot only consists of built-in types (dicts and strings), does not
+            depend on the configured state name separator and can thus be serialized (e.g. to JSON) to
+            persist it. Use set_state_snapshot to restore the configuration later.
+        Args:
+            model (optional[object]): The model to create a snapshot of. If not set, the machine's model
+                is used which requires exactly one model to be attached to the machine.
+        Returns:
+            dict: A dictionary mapping each active state name to a dictionary of its active children.
+                Leaf states (and entered states without active children) map to empty dictionaries.
+        Raises:
+            MachineError: When no model is passed and not exactly one model is attached to the machine.
+        """
+        if model is None:
+            if len(self.models) != 1:
+                raise MachineError("Cannot determine the model to create a snapshot of! Pass a model "
+                                   "explicitly when not exactly one model is attached to the machine.")
+            model = self.models[0]
+        state_tree = self.build_state_tree(listify(getattr(model, self.model_attribute)),
+                                           self.state_cls.separator)
+        return self._state_tree_to_snapshot(state_tree)
+
+    def set_state_snapshot(self, snapshot, model=None):
+        """Restores a state configuration previously created with get_state_snapshot. The configuration
+            is applied directly without triggering any enter/exit callbacks or transitions. The snapshot
+            is validated against the machine's state configuration first; malformed or outdated snapshots
+            (e.g. unknown states, missing parallel branches or unspecified children of states with an
+            initial substate) raise an error instead of being 'repaired' by guessing a default state.
+        Args:
+            snapshot (dict): A state configuration snapshot created with get_state_snapshot.
+            model (optional[object]): targeted model; if not set, all models will be set to 'snapshot'
+        Raises:
+            ValueError: When the snapshot is malformed or does not match the machine's state
+                configuration (anymore).
+        """
+        with self():
+            if not snapshot:
+                raise ValueError("Invalid state snapshot {0}! A snapshot must be a non-empty "
+                                 "dictionary mapping state names to their active children."
+                                 "".format(snapshot))
+            self._validate_snapshot(snapshot, self.states, [])
+        model_states = _build_state_list(snapshot, self.state_cls.separator)
+        self.set_state(model_states, model)
+
+    @classmethod
+    def _state_tree_to_snapshot(cls, state_tree):
+        return {name: cls._state_tree_to_snapshot(children) for name, children in state_tree.items()}
+
+    def _validate_snapshot(self, snapshot, states, prefix):
+        if not isinstance(snapshot, dict):
+            raise ValueError("Invalid state snapshot {0}! A snapshot must be a non-empty dictionary "
+                             "mapping state names to their active children.".format(snapshot))
+        for name, children in snapshot.items():
+            path = prefix + [name]
+            state_name = self.state_cls.separator.join(str(p) for p in path)
+            if name not in states:
+                raise ValueError("State '{0}' of the snapshot is not a registered state! The snapshot "
+                                 "is probably outdated or belongs to another machine."
+                                 "".format(state_name))
+            state = states[name]
+            if not isinstance(children, dict):
+                raise ValueError("Invalid state snapshot! The children of state '{0}' must be a "
+                                 "dictionary.".format(state_name))
+            initial = state.initial
+            if isinstance(initial, (list, tuple)) and initial:
+                # parallel state: all branches have to be active, no more and no less
+                expected = set(getattr(i, 'name', i) for i in initial)
+                if set(children.keys()) != expected:
+                    raise ValueError("Snapshot of parallel state '{0}' must contain exactly the "
+                                     "branches {1} but contains {2}!".format(state_name,
+                                                                             sorted(expected),
+                                                                             sorted(children.keys())))
+            else:
+                if len(children) > 1:
+                    raise ValueError("State '{0}' is not a parallel state but the snapshot contains "
+                                     "multiple active children {1}!".format(state_name,
+                                                                            sorted(children.keys())))
+                if initial and not children:
+                    raise ValueError("Snapshot does not specify which child of '{0}' is active even "
+                                     "though the state defines an initial substate! Refusing to guess "
+                                     "a default state.".format(state_name))
+            self._validate_snapshot(children, state.states, path)
+
     def to_state(self, model, state_name, *args, **kwargs):
         """Helper function to add go to states in case a custom state separator is used.
         Args:
